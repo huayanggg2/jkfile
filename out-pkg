@@ -1,0 +1,169 @@
+pipeline {
+    agent none
+    environment {
+                PROJECT_NAME='ACOS'
+                GIT_URL = 'ssh://git@gitlab.prod.dtstack.cn:10022/dtsmart/acos-dockerfile.git'
+                HARBOR_CRT = 'acos-registry'
+                HARBOR = 'acos-registry.cn-hangzhou.cr.aliyuncs.com'
+                SEALOS_HBRBOR = 'sealos.hub:5000'
+                PROJENT_PATH='/data/packages/dtops/DeployPackages'
+                IMAGE_FILE = "${env.PROJENT_PATH}/${PROJECT_NAME}/install/pkg/acos"
+                JOB_JSON = """{
+                    'arms-collector' : 'acos-arms-collector-multiarch',
+                    'dtlogux' : 'acos-dtlogux-multiarch',
+                    'dtuicfront' : 'acos-dtuicfront-multiarch',
+                    'dtuic' : 'acos-dtuic-multiarch',
+                    'acos-gateway' : 'acos-gateway-multiarch',
+                    'integration' : 'acos-intergration-multiarch',
+                    'jlogapp' : 'acos-jlogapp-multiarch',
+                    'logkitserver' : 'acos-logkitserver-multiarch',
+                    'minio' : 'acos-minio-multiarch',
+                    'yc-console' : 'acos-yc-console-multiarch',
+                    'schedule-alert' : 'acos-yc-schedule-alert-multiarch',
+                    'schedule-inspect' : 'acos-yc-schedule-inspect-multiarch',
+                    'schedule-platform' : 'acos-yc-schedule-platform-multiarch',
+                    'stream-alert' : 'acos-yc-stream-alert-multiarch',
+                    'arms-retcode-nginx' : 'arms-retcode-nginx-multiarch'
+                }"""
+        }
+    stages {
+        //拉取代码
+
+                stage('get clone repo') {
+                agent {label "host-172-16-82-184"}
+                steps{
+                script {
+
+                    def list ="$DOCKER_BRANCH".split('/')
+                    def branchs = list[1]
+                    git branch: "$branchs",credentialsId: '', url: env.GIT_URL
+                    }
+                }}
+                stage('build') {
+                    steps {
+                        script {
+                        def AGENT_LABEL
+                        if ("${architecture}".trim() == 'amd'){
+                             AGENT_LABEL = 'host-172-16-82-184'
+                            echo "label: ${AGENT_LABEL}"
+                        }else if ("${architecture}".trim() == 'arm'){
+                             AGENT_LABEL = 'slave3-172-16-86-7'
+                            echo "label: ${AGENT_LABEL}"
+                        }else if ("${architecture}".trim() == 'all'){
+                             AGENT_LABEL = "slave3-172-16-86-7,host-172-16-82-184"
+                            echo "label: ${AGENT_LABEL}"
+                        }
+                        env.LABELS=AGENT_LABEL
+                        if ("$Component"){
+                        def LIST_PROJECT = "$PROJECT_TYPE".split(",")
+                        def nodeList = "$Component".split(",")
+
+                        for (int i = 0; i < LIST_PROJECT.size(); i++) {
+                        runParallel items: nodeList.collect { "${it}" },LIST_PROJECT[i],AGENT_LABEL
+                        }
+                        }
+                    }
+                    }
+                }
+           stage('Multiple pkg') {
+             steps {
+               script {
+                for (label in env.LABELS.split(',')) {
+                stage('上传和部署') {
+
+                                 node(label){
+                                        script {
+                                                def V_NAME="${app_branch}".trim()
+                                                def VERSION="${V_NAME}".split('_')[1].trim()
+                                                if("${OUT_PKG}" == 'YES'){
+
+                                                sh """sudo tar -zcf ${PROJENT_PATH}/${PROJECT_NAME}.tgz -C ${PROJENT_PATH}/ ./${PROJECT_NAME} """
+
+                                                }
+
+                                        if("${UPLOAD_OSS}" == 'YES'){
+                                                def arch
+                                                if (label == 'host-172-16-82-184'){
+                                                    arch = 'amd'
+                                                }else if (label == 'slave3-172-16-86-7'){
+                                                    arch = 'arm'
+                                                }
+
+                                                sh """ sudo sh /data/workspace/bash/acos.sh ${PROJENT_PATH}/${PROJECT_NAME}.tgz ${PROJECT_NAME}-${VERSION}-${arch}-K8S.tgz """
+                                                sh """ sudo rm -rf ${PROJENT_PATH}/${PROJECT_NAME}.tgz """
+                                            }
+
+                                  }
+                                  }
+                            }}
+                }}}
+        }
+}
+
+
+
+def runParallel(args,HARBOR_PROJECT,AGENT_LABEL) {
+    parallel args.items.collectEntries { servicename ->
+        [
+        "${servicename}": {
+                def jobs = readJSON text: env.JOB_JSON
+
+                stage("${servicename}") {
+                def appname="${jobs[servicename]}".trim()
+                def image_path="${HARBOR_PROJECT}/${image_tag}"
+                def image_name="${env.HARBOR}/${HARBOR_PROJECT}/${servicename}" + ":${image_tag}"
+                def sealos_img_name="${env.SEALOS_HBRBOR}/${HARBOR_PROJECT}/${servicename}" + ":${image_tag}"
+                    //构建镜像
+                if ("${compile}" == 'YES'){
+                stage("Build ${appname}") {
+                agent {label "host-172-16-82-184"}
+                script {
+                    if ("${servicename}" == 'logkitserver'){
+                    def frontendBuild=build(job: "DtAgentPlus",propagate: false, wait: true, parameters: [
+                                            gitParameter(name: 'git_branch', value: "origin/${app_branch}"),
+                                            gitParameter(name: 'git_collector', value: "origin/${app_branch}"),
+                                            gitParameter(name: 'git_agent', value: "origin/${app_branch}"),
+                                            string(name: 'LOGKIT_TYPE', value: "logkit_server")])
+                    }
+
+                }
+                def appbch=''
+                if ("${servicename}".trim() in ['jlogapp','yc-console','dtuic','schedule-alert','schedule-inspect','schedule-platform','stream-alert']){
+                        appbch="origin/${app_branch}"
+                }else{
+                    appbch="${app_branch}"
+                }
+
+                dockerfile_branch="${DOCKER_BRANCH}".split('/')[1].trim()
+                def frontendBuild=build(job: "${appname}",propagate: false, wait: true, parameters: [
+                gitParameter(name: 'branch', value: "${DOCKER_BRANCH}"),
+                string(name: 'app_branch', value: "${appbch}"),
+                string(name: 'build_cmd', value: ""),
+                string(name: 'image_tag', value: "${image_tag}".trim())])
+                def res = frontendBuild.getResult()
+                println "${appname} ${res}"
+                if( "${res}" != 'SUCCESS' ) {
+                        throw new Exception("${appname} 执行失败，请重试")
+                }
+            }
+        }
+
+            //下载阿里云镜像到本地
+
+            for (label in AGENT_LABEL.split(',')) {
+            stage("下载镜像"){
+            node(label){
+                sh "sudo docker pull $image_name"
+                sh "sudo docker tag $image_name $sealos_img_name"
+                sh "sudo docker save $sealos_img_name > ${env.IMAGE_FILE}/${servicename}.tar"
+                sh "sudo docker rmi $HARBOR/"+"${HARBOR_PROJECT}/${servicename}:${image_tag}"
+                sh "sudo docker rmi $SEALOS_HBRBOR/"+"${HARBOR_PROJECT}/${servicename}:${image_tag}"
+               }
+               }
+            }
+          }
+      }
+
+        ]
+    }
+}
