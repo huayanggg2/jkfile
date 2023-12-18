@@ -1,0 +1,90 @@
+env.GITLAB_URL='ssh://git@gitlab.prod.dtstack.cn:10022/dtsmart'
+pipeline {
+    agent {label "master"}
+    stages{
+        stage('get clone repo') {
+            steps{
+                script {
+                    def SERVICE_LIST = "$SERVICES".split(",")
+                    runParallel items: SERVICE_LIST.collect { "${it}" }
+                        }
+                    }
+            }
+        }
+
+}
+
+def runParallel(args) {
+    parallel args.items.collectEntries { SERVICE ->
+        [
+        "${SERVICE}": {
+
+                def git_url="${env.GITLAB_URL}/${SERVICE}.git"
+                println "$git_url"
+             stage("${SERVICE}") {
+                stage('创建目录') {
+
+                        sh "sudo mkdir -p $WORKSPACE/${SERVICE} && sudo chown -R jenkins:jenkins $WORKSPACE/${SERVICE}"
+
+
+                }
+                stage ("源码下载") {
+
+                script{
+                checkout(
+                        [
+                          $class: 'GitSCM',
+                          branches: [[name: '*/${GIT_BRANCH}']],
+                          extensions: [
+                            [
+                              $class: 'CloneOption', timeout: 15
+                            ],
+                            [
+                              $class: 'RelativeTargetDirectory',
+                              relativeTargetDir: "$WORKSPACE/${SERVICE}"
+                            ]
+                          ],
+                          userRemoteConfigs: [[
+                            url: "$git_url"
+                                          ]]
+                        ]
+                      )
+
+        }
+        }
+                stage('SonarQube 检测'){
+
+         script {
+                          scannerHome = tool 'MyScanner'
+                    }
+
+            withSonarQubeEnv(installationName: 'MySonarQube',credentialsId: 'f5268af7-dd10-41db-ae02-5a6a10d4fb97') {
+                    sh "${scannerHome}/bin/sonar-scanner " +
+                    "-Dsonar.projectKey=${SERVICE} " +
+                    "-Dsonar.pdf.username=admin " +
+                    "-Dsonar.pdf.password=admin123 " +
+                    "-Dsonar.projectBaseDir=$WORKSPACE/${SERVICE}/ " +
+                    "-Dsonar.projectName=${SERVICE} " +
+                    "-Dsonar.sourceEncoding=UTF-8 " +
+                    "-Dsonar.language=javasonar.source " +
+                    "-Dsonar.exclusions=**/*.css,**/*.js,**/*.xml " +
+                    "-Dsonar.sources=$WORKSPACE/${SERVICE}/ " +
+                    "-Dsonar.java.binaries=$WORKSPACE/${SERVICE}/"
+            }
+
+        }
+
+
+                }
+
+        }
+        ]
+    }
+}
+
+
+
+
+
+
+
